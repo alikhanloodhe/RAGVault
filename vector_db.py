@@ -2,7 +2,7 @@
 from qdrant_client import QdrantClient
 
 # Import required models/classes for defining points and vector settings
-from qdrant_client.models import PointStruct, Distance, VectorParams
+from qdrant_client.models import PointStruct, Distance, VectorParams, Filter, FieldCondition, MatchValue
 
 import os
 
@@ -125,7 +125,7 @@ class QdrantStorage:
             points=points
         )
 
-    def search(self, query_vector, top_k: int = 5):
+    def search(self, query_vector, source_id: str = None, top_k: int = 5):
         """
         Search for the most similar vectors/documents.
 
@@ -133,6 +133,9 @@ class QdrantStorage:
         ----------
         query_vector : list
             Embedding vector of the query text.
+            
+        source_id : str
+            Optional source ID to filter the search results to a specific PDF.
 
         top_k : int
             Number of top matching results to return.
@@ -145,6 +148,17 @@ class QdrantStorage:
                 "sources": [unique document sources]
             }
         """
+        
+        query_filter = None
+        if source_id:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="source",
+                        match=MatchValue(value=source_id)
+                    )
+                ]
+            )
 
         # Perform similarity search in Qdrant.
         # Newer qdrant-client versions expose `query_points` instead of `search`.
@@ -152,6 +166,7 @@ class QdrantStorage:
             response = self.client.query_points(
                 collection_name=self.collection,
                 query=query_vector,
+                query_filter=query_filter,
                 with_payload=True,
                 limit=top_k,
             )
@@ -161,6 +176,7 @@ class QdrantStorage:
             results = self.client.search(
                 collection_name=self.collection,
                 query_vector=query_vector,
+                query_filter=query_filter,
                 with_payload=True,  # Return metadata/payload
                 limit=top_k,        # Number of results
             )
@@ -195,3 +211,19 @@ class QdrantStorage:
             "contexts": contexts,
             "sources": list(sources)
         }
+
+    def delete_points(self, source_id: str):
+        """
+        Delete all points associated with a specific source_id.
+        """
+        self.client.delete(
+            collection_name=self.collection,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="source",
+                        match=MatchValue(value=source_id)
+                    )
+                ]
+            )
+        )

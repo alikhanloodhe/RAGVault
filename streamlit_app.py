@@ -45,25 +45,25 @@ st.markdown("""
 
 def get_inngest_client() -> inngest.Inngest:
     # Match the app_id in main.py
-    is_prod = os.getenv("RENDER") is not None
+    # If INNGEST_EVENT_KEY is in .env, assume we want to talk to the Cloud
+    is_prod = os.getenv("RENDER") is not None or os.getenv("INNGEST_EVENT_KEY") is not None
     return inngest.Inngest(app_id="my-rag-application", is_production=is_prod)
 
-def save_uploaded_pdf(file) -> Path:
-    uploads_dir = Path("uploads")
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    file_path = uploads_dir / file.name
-    file_bytes = file.getbuffer()
-    file_path.write_bytes(file_bytes)
-    return file_path
+def save_uploaded_pdf(file) -> str:
+    backend_url = os.getenv("FASTAPI_BACKEND_URL", "http://127.0.0.1:10000").rstrip("/")
+    files = {"file": (file.name, file.getvalue(), "application/pdf")}
+    resp = requests.post(f"{backend_url}/upload", files=files)
+    resp.raise_for_status()
+    return resp.json()["path"]
 
-async def send_rag_ingest_event(pdf_path: Path) -> None:
+async def send_rag_ingest_event(pdf_path: str, source_id: str) -> None:
     client = get_inngest_client()
     await client.send(
         inngest.Event(
             name="rag/ingest_pdf",
             data={
-                "pdf_path": str(pdf_path.resolve()),
-                "source_id": pdf_path.name,
+                "pdf_path": pdf_path,
+                "source_id": source_id,
             },
         )
     )
@@ -80,15 +80,20 @@ with col1:
 
     if uploaded is not None:
         with st.spinner("Uploading and triggering ingestion..."):
+            # Generate a unique source_id for this upload
+            import uuid
+            source_id = f"{uploaded.name}_{uuid.uuid4().hex[:8]}"
+            st.session_state["source_id"] = source_id
+            
             path = save_uploaded_pdf(uploaded)
             # Kick off the event and block until the send completes
-            asyncio.run(send_rag_ingest_event(path))
+            asyncio.run(send_rag_ingest_event(path, source_id))
             # Small pause for user feedback continuity
             time.sleep(0.3)
-        st.success(f"✅ Triggered ingestion for: {path.name}")
-        st.caption("You can upload another PDF if you like.")
+        st.success(f"✅ Triggered ingestion for: {uploaded.name}")
+        st.caption("This document and its data will automatically be deleted in 1 hour.")
 
-async def send_rag_query_event(question: str, top_k: int) -> None:
+async def send_rag_query_event(question: str, top_k: int, source_id: str) -> None:
     client = get_inngest_client()
     result = await client.send(
         inngest.Event(
@@ -97,19 +102,31 @@ async def send_rag_query_event(question: str, top_k: int) -> None:
             data={
                 "question": question,
                 "top_k": top_k,
+                "source_id": source_id,
             },
         )
     )
     return result[0]
 
 def _inngest_api_base() -> str:
-    if os.getenv("RENDER") is not None:
+    is_prod = os.getenv("RENDER") is not None or os.getenv("INNGEST_EVENT_KEY") is not None
+    if is_prod:
         return "https://api.inngest.com/v1"
     return os.getenv("INNGEST_API_BASE", "http://127.0.0.1:8288/v1")
 
 def fetch_runs(event_id: str) -> list[dict]:
     url = f"{_inngest_api_base()}/events/{event_id}/runs"
-    resp = requests.get(url)
+    headers = {}
+    
+    # If using Inngest Cloud, we must provide a REST API key to fetch run outputs
+    is_prod = os.getenv("RENDER") is not None or os.getenv("INNGEST_EVENT_KEY") is not None
+    if is_prod:
+        rest_api_key = os.getenv("INNGEST_REST_API_KEY")
+        if not rest_api_key:
+            raise ValueError("To poll Inngest Cloud for answers, you must add INNGEST_REST_API_KEY to your .env file.")
+        headers["Authorization"] = f"Bearer {rest_api_key}"
+
+    resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", [])
@@ -141,11 +158,15 @@ with col2:
         submitted = st.form_submit_button("Generate Answer")
 
         if submitted and question.strip():
-            with st.spinner("🧠 Thinking..."):
-                # Fire-and-forget event to Inngest for observability/workflow
-                event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k)))
-                # Poll the local Inngest API for the run's output
-                output = wait_for_run_output(event_id)
+            source_id = st.session_state.get("source_id")
+            if not source_id:
+                st.error("Please upload a PDF first before asking a question!")
+            else:
+                with st.spinner("🧠 Thinking..."):
+                    # Fire-and-forget event to Inngest for observability/workflow
+                    event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k), source_id))
+                    # Poll the local Inngest API for the run's output
+                    output = wait_for_run_output(event_id)
                 answer = output.get("answer", "")
                 sources = output.get("sources", [])
 

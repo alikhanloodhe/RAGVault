@@ -1,7 +1,8 @@
 # In this file, we set up our FastAPI application and integrate it with Inngest for event handling.
 # importing necessary libraries and modules for our application.
 import logging 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
+import shutil
 import inngest
 import inngest.fast_api 
 from inngest.experimental import ai
@@ -64,6 +65,18 @@ async def rag_ingest_pdf(ctx: inngest.Context):
 
     chunks_and_src = await ctx.step.run("load-and-chunk", lambda: _load(ctx), output_type=RAGChunkAndSrc)
     ingested = await ctx.step.run("embed-and-upsert", lambda: _upsert(chunks_and_src), output_type=RAGUpsertResult)
+    
+    # Wait for 1 hour, then automatically clean up the file and embeddings
+    await ctx.step.sleep("wait-1-hour", "1h")
+    
+    def _delete_file():
+        pdf_path = _get_first(ctx.event.data, "pdf_path", "pdf path", "pdfPath")
+        if pdf_path and os.path.exists(pdf_path):
+            os.remove(pdf_path)
+            
+    await ctx.step.run("delete-file", _delete_file)
+    await ctx.step.run("delete-embeddings", lambda: QdrantStorage().delete_points(chunks_and_src.source_id))
+
     return ingested.model_dump()
 
 
@@ -72,16 +85,17 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     trigger=inngest.TriggerEvent(event="rag/query_pdf"),
 )
 async def rag_query_pdf_ai(ctx: inngest.Context):
-    def _search(question: str, top_k: int = 5) -> RAGSearchResult:
+    def _search(question: str, top_k: int = 5, source_id: str = None) -> RAGSearchResult:
         query_vec = embed_texts([question])[0]
         store = QdrantStorage()
-        found = store.search(query_vec, top_k)
+        found = store.search(query_vec, source_id=source_id, top_k=top_k)
         return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
 
     question = ctx.event.data["question"]
     top_k = int(ctx.event.data.get("top_k", 5))
+    source_id = ctx.event.data.get("source_id")
 
-    found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k), output_type=RAGSearchResult)
+    found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k, source_id), output_type=RAGSearchResult)
 
     context_block = "\n\n".join(f"- {c}" for c in found.contexts)
     user_content = (
@@ -124,6 +138,13 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
 
 app = FastAPI()  # Create a FastAPI application instance
 
-
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    os.makedirs("uploads", exist_ok=True)
+    file_path = os.path.join("uploads", file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    # Return the absolute path on the server so Inngest can find it
+    return {"path": os.path.abspath(file_path)}
 
 inngest.fast_api.serve(app, inngest_client, functions=[rag_ingest_pdf, rag_query_pdf_ai])  # Integrate Inngest with FastAPI
