@@ -88,6 +88,16 @@ class QdrantStorage:
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
 
+        # Create a payload index on the 'source' field so we can filter by source_id
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection,
+                field_name="source",
+                field_schema="keyword",
+            )
+        except Exception:
+            pass
+
     def upsert(self, ids, vectors, payloads):
         """
         Insert or update vectors in the collection.
