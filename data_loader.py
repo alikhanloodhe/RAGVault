@@ -1,4 +1,5 @@
 import requests
+from huggingface_hub import InferenceClient
 
 # Import PDF reader from LlamaIndex
 from llama_index.readers.file import PDFReader
@@ -27,7 +28,6 @@ HF_MODEL = os.getenv(
     "SENTENCE_TRANSFORMER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
 HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-HF_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
 
 # all-MiniLM-L6-v2 -> 384 dimensions
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
@@ -150,20 +150,17 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not HF_API_KEY:
         raise ValueError("HUGGINGFACE_API_KEY is missing. Please set it in your .env or Render dashboard.")
 
-    headers = {
-        "Authorization": f"Bearer {HF_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    client = InferenceClient(api_key=HF_API_KEY)
     
-    # We send the list of texts. 'wait_for_model': True ensures it doesn't fail if the model is loading
-    response = requests.post(
-        HF_URL, 
-        headers=headers, 
-        json={"inputs": texts, "options": {"wait_for_model": True}}
-    )
+    # Send the list of texts to Hugging Face Inference API
+    # huggingface_hub automatically handles the correct endpoint routing
+    # Depending on the model and inputs, it returns a numpy array or nested lists.
+    import numpy as np
     
-    if response.status_code != 200:
-        raise RuntimeError(f"Hugging Face API Error: {response.text}")
-
-    vectors = response.json()
-    return vectors
+    result = client.feature_extraction(texts, model=HF_MODEL)
+    
+    # Ensure it's a list of floats (if numpy array is returned)
+    if isinstance(result, np.ndarray):
+        return result.tolist()
+    
+    return result
