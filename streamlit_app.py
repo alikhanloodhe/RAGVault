@@ -56,6 +56,20 @@ def save_uploaded_pdf(file) -> str:
     resp.raise_for_status()
     return resp.json()["path"]
 
+def query_backend(question: str, top_k: int, source_id: str) -> dict:
+    backend_url = os.getenv("FASTAPI_BACKEND_URL", "http://127.0.0.1:10000").rstrip("/")
+    resp = requests.post(
+        f"{backend_url}/query",
+        json={
+            "question": question,
+            "top_k": top_k,
+            "source_id": source_id,
+        },
+        timeout=90,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
 async def send_rag_ingest_event(pdf_path: str, source_id: str) -> None:
     client = get_inngest_client()
     await client.send(
@@ -172,18 +186,25 @@ def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s
                         output_val = json.loads(output_val)
                     except Exception:
                         pass
+                        
+                # Sometimes Inngest wraps output in a list
+                if isinstance(output_val, list) and len(output_val) > 0:
+                    output_val = output_val[0]
                 
-                # Only return if we actually got the answer, otherwise keep waiting
-                if output_val and "answer" in output_val:
-                    return output_val
-                elif time.time() - start > timeout_s:
-                    return output_val # Give up and return what we have
+                # Ensure it's a dict before returning
+                if not isinstance(output_val, dict):
+                    output_val = {"raw_output": output_val}
+                
+                # Since the run is Completed, the output is final. Return it immediately.
+                return output_val
             
             if status in ("Failed", "Cancelled"):
                 raise RuntimeError(f"Function run {status}")
         
         if time.time() - start > timeout_s:
-            raise TimeoutError(f"Timed out waiting for run output (last status: {last_status})")
+            # Instead of crashing, just return empty so the UI says (No answer) gracefully
+            return {}
+            
         time.sleep(poll_interval_s)
 
 with col2:
@@ -196,17 +217,21 @@ with col2:
         submitted = st.form_submit_button("Generate Answer")
 
         if submitted and question.strip():
+            answer = ""
+            sources = []
             source_id = st.session_state.get("source_id")
             if not source_id:
                 st.error("Please upload a PDF first before asking a question!")
             else:
-                with st.spinner("🧠 Thinking..."):
-                    # Fire-and-forget event to Inngest for observability/workflow
-                    event_id = asyncio.run(send_rag_query_event(question.strip(), int(top_k), source_id))
-                    # Poll the local Inngest API for the run's output
-                    output = wait_for_run_output(event_id)
-                answer = output.get("answer", "")
-                sources = output.get("sources", [])
+                try:
+                    with st.spinner("🧠 Thinking..."):
+                        output = query_backend(question.strip(), int(top_k), source_id)
+                    answer = output.get("answer", "")
+                    sources = output.get("sources", [])
+                except requests.HTTPError as exc:
+                    st.error(f"Query failed: {exc.response.text}")
+                except requests.RequestException as exc:
+                    st.error(f"Could not reach the FastAPI backend: {exc}")
 
             st.markdown("### Answer")
             st.info(answer or "(No answer)")

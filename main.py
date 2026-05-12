@@ -10,12 +10,74 @@ from dotenv import load_dotenv
 import os
 import uuid
 import datetime
+import requests
+from pydantic import BaseModel
 from data_loader import load_and_chunk_pdf, embed_texts
 from vector_db import QdrantStorage
 from custome_types import RAGChunkAndSrc, RAGUpsertResult, RAGSearchResult, RAQQueryResult
 
 
 load_dotenv()  # Load environment variables from .env file
+
+
+class QueryRequest(BaseModel):
+    question: str
+    top_k: int = 5
+    source_id: str | None = None
+
+
+def search_pdf_context(question: str, top_k: int = 5, source_id: str | None = None) -> RAGSearchResult:
+    query_vec = embed_texts([question])[0]
+    store = QdrantStorage()
+    found = store.search(query_vec, source_id=source_id, top_k=top_k)
+    return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
+
+
+def build_answer_prompt(question: str, contexts: list[str]) -> str:
+    context_block = "\n\n".join(f"- {c}" for c in contexts)
+    return (
+        "Use the following context to answer the question.\n\n"
+        f"Context:\n{context_block}\n\n"
+        f"Question: {question}\n"
+        "Answer concisely using the context above."
+    )
+
+
+def ask_groq(question: str, contexts: list[str]) -> str:
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise ValueError("GROQ_API_KEY is missing. Add it to your .env")
+
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {groq_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": groq_model,
+            "max_tokens": 1024,
+            "temperature": 0.2,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful RAG assistant. Answer using only the provided context.",
+                },
+                {"role": "user", "content": build_answer_prompt(question, contexts)},
+            ],
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def query_pdf(question: str, top_k: int = 5, source_id: str | None = None) -> RAQQueryResult:
+    found = search_pdf_context(question, top_k, source_id)
+    answer = ask_groq(question, found.contexts)
+    return RAQQueryResult(answer=answer, sources=found.sources, num_contexts=len(found.contexts))
+
 
 inngest_client = inngest.Inngest(
     app_id = "my-rag-application",
@@ -85,24 +147,14 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     trigger=inngest.TriggerEvent(event="rag/query_pdf"),
 )
 async def rag_query_pdf_ai(ctx: inngest.Context):
-    def _search(question: str, top_k: int = 5, source_id: str = None) -> RAGSearchResult:
-        query_vec = embed_texts([question])[0]
-        store = QdrantStorage()
-        found = store.search(query_vec, source_id=source_id, top_k=top_k)
-        return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
-
     question = ctx.event.data["question"]
     top_k = int(ctx.event.data.get("top_k", 5))
     source_id = ctx.event.data.get("source_id")
 
-    found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k, source_id), output_type=RAGSearchResult)
-
-    context_block = "\n\n".join(f"- {c}" for c in found.contexts)
-    user_content = (
-        "Use the following context to answer the question.\n\n"
-        f"Context:\n{context_block}\n\n"
-        f"Question: {question}\n"
-        "Answer concisely using the context above."
+    found = await ctx.step.run(
+        "embed-and-search",
+        lambda: search_pdf_context(question, top_k, source_id),
+        output_type=RAGSearchResult,
     )
 
     groq_api_key = os.getenv("GROQ_API_KEY")
@@ -128,7 +180,7 @@ async def rag_query_pdf_ai(ctx: inngest.Context):
                     "role": "system",
                     "content": "You are a helpful RAG assistant. Answer using only the provided context.",
                 },
-                {"role": "user", "content": user_content},
+                {"role": "user", "content": build_answer_prompt(question, found.contexts)},
             ],
         },
     )
@@ -146,5 +198,11 @@ async def upload_pdf(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     # Return the absolute path on the server so Inngest can find it
     return {"path": os.path.abspath(file_path)}
+
+
+@app.post("/query", response_model=RAQQueryResult)
+async def query_pdf_endpoint(payload: QueryRequest):
+    return query_pdf(payload.question, payload.top_k, payload.source_id)
+
 
 inngest.fast_api.serve(app, inngest_client, functions=[rag_ingest_pdf, rag_query_pdf_ai])  # Integrate Inngest with FastAPI
