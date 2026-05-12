@@ -121,18 +121,29 @@ def fetch_runs(event_id: str) -> list[dict]:
     url = f"{_inngest_api_base()}/events/{event_id}/runs"
     headers = {}
     
-    # If using Inngest Cloud, we must provide a REST API key to fetch run outputs
     is_prod = os.getenv("RENDER") is not None or os.getenv("INNGEST_EVENT_KEY") is not None
     if is_prod:
         rest_api_key = os.getenv("INNGEST_REST_API_KEY")
-        if not rest_api_key:
-            raise ValueError("To poll Inngest Cloud for answers, you must add INNGEST_REST_API_KEY to your .env file.")
-        headers["Authorization"] = f"Bearer {rest_api_key}"
+        if rest_api_key:
+            headers["Authorization"] = f"Bearer {rest_api_key}"
 
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", [])
+
+def get_run(run_id: str) -> dict:
+    url = f"{_inngest_api_base()}/runs/{run_id}"
+    headers = {}
+    is_prod = os.getenv("RENDER") is not None or os.getenv("INNGEST_EVENT_KEY") is not None
+    if is_prod:
+        rest_api_key = os.getenv("INNGEST_REST_API_KEY")
+        if rest_api_key:
+            headers["Authorization"] = f"Bearer {rest_api_key}"
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        return resp.json().get("data", {})
+    return {}
 
 def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s: float = 0.5) -> dict:
     start = time.time()
@@ -144,16 +155,33 @@ def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s
             status = run.get("status")
             last_status = status or last_status
             if status in ("Completed", "Succeeded", "Success", "Finished"):
-                output_val = run.get("output") or {}
+                output_val = run.get("output")
+                
+                # If output is missing from list endpoint, fetch the specific run
+                if not output_val:
+                    run_id = run.get("id") or run.get("run_id")
+                    if run_id:
+                        full_run = get_run(run_id)
+                        output_val = full_run.get("output")
+                
+                output_val = output_val or {}
+                
                 if isinstance(output_val, str):
                     import json
                     try:
                         output_val = json.loads(output_val)
                     except Exception:
                         pass
-                return output_val
+                
+                # Only return if we actually got the answer, otherwise keep waiting
+                if output_val and "answer" in output_val:
+                    return output_val
+                elif time.time() - start > timeout_s:
+                    return output_val # Give up and return what we have
+            
             if status in ("Failed", "Cancelled"):
                 raise RuntimeError(f"Function run {status}")
+        
         if time.time() - start > timeout_s:
             raise TimeoutError(f"Timed out waiting for run output (last status: {last_status})")
         time.sleep(poll_interval_s)
