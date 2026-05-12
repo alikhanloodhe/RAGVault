@@ -45,7 +45,8 @@ st.markdown("""
 
 def get_inngest_client() -> inngest.Inngest:
     # Match the app_id in main.py
-    return inngest.Inngest(app_id="my-rag-application", is_production=False)
+    is_prod = os.getenv("RENDER") is not None
+    return inngest.Inngest(app_id="my-rag-application", is_production=is_prod)
 
 def save_uploaded_pdf(file) -> Path:
     uploads_dir = Path("uploads")
@@ -102,6 +103,8 @@ async def send_rag_query_event(question: str, top_k: int) -> None:
     return result[0]
 
 def _inngest_api_base() -> str:
+    if os.getenv("RENDER") is not None:
+        return "https://api.inngest.com/v1"
     return os.getenv("INNGEST_API_BASE", "http://127.0.0.1:8288/v1")
 
 def fetch_runs(event_id: str) -> list[dict]:

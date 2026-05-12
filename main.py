@@ -19,7 +19,7 @@ load_dotenv()  # Load environment variables from .env file
 inngest_client = inngest.Inngest(
     app_id = "my-rag-application",
     logger = logging.getLogger("uvicorn"),
-    is_production=False,
+    is_production=os.getenv("RENDER") is not None,
     serializer= inngest.PydanticSerializer()
 
 )  # Initialize Inngest client
