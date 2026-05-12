@@ -80,16 +80,19 @@ with col1:
 
     if uploaded is not None:
         with st.spinner("Uploading and triggering ingestion..."):
-            # Generate a unique source_id for this upload
-            import uuid
-            source_id = f"{uploaded.name}_{uuid.uuid4().hex[:8]}"
-            st.session_state["source_id"] = source_id
-            
-            path = save_uploaded_pdf(uploaded)
-            # Kick off the event and block until the send completes
-            asyncio.run(send_rag_ingest_event(path, source_id))
-            # Small pause for user feedback continuity
-            time.sleep(0.3)
+            # Check if we already ingested this exact file during this session
+            if st.session_state.get("uploaded_filename") != uploaded.name:
+                # Generate a unique source_id for this upload
+                import uuid
+                source_id = f"{uploaded.name}_{uuid.uuid4().hex[:8]}"
+                st.session_state["source_id"] = source_id
+                st.session_state["uploaded_filename"] = uploaded.name
+                
+                path = save_uploaded_pdf(uploaded)
+                # Kick off the event and block until the send completes
+                asyncio.run(send_rag_ingest_event(path, source_id))
+                # Small pause for user feedback continuity
+                time.sleep(0.3)
         st.success(f"✅ Triggered ingestion for: {uploaded.name}")
         st.caption("This document and its data will automatically be deleted in 1 hour.")
 
@@ -141,7 +144,14 @@ def wait_for_run_output(event_id: str, timeout_s: float = 120.0, poll_interval_s
             status = run.get("status")
             last_status = status or last_status
             if status in ("Completed", "Succeeded", "Success", "Finished"):
-                return run.get("output") or {}
+                output_val = run.get("output") or {}
+                if isinstance(output_val, str):
+                    import json
+                    try:
+                        output_val = json.loads(output_val)
+                    except Exception:
+                        pass
+                return output_val
             if status in ("Failed", "Cancelled"):
                 raise RuntimeError(f"Function run {status}")
         if time.time() - start > timeout_s:

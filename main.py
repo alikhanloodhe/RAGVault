@@ -66,8 +66,8 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     chunks_and_src = await ctx.step.run("load-and-chunk", lambda: _load(ctx), output_type=RAGChunkAndSrc)
     ingested = await ctx.step.run("embed-and-upsert", lambda: _upsert(chunks_and_src), output_type=RAGUpsertResult)
     
-    # Wait for 1 hour, then automatically clean up the file and embeddings
-    await ctx.step.sleep("wait-1-hour", datetime.timedelta(hours=1))
+    # Wait for 10 minutes, then automatically clean up the file and embeddings
+    await ctx.step.sleep("wait-10-mins", datetime.timedelta(minutes=10))
     
     def _delete_file():
         pdf_path = _get_first(ctx.event.data, "pdf_path", "pdf path", "pdfPath")
