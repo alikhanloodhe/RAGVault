@@ -1,6 +1,4 @@
-from functools import lru_cache
-
-from sentence_transformers import SentenceTransformer
+import requests
 
 # Import PDF reader from LlamaIndex
 from llama_index.readers.file import PDFReader
@@ -23,19 +21,16 @@ load_dotenv()
 
 
 # ---------------------------------------------------
-# Embedding model configuration (local)
+# Embedding model configuration (Hugging Face API)
 # ---------------------------------------------------
-SENTENCE_TRANSFORMER_MODEL = os.getenv(
-    "SENTENCE_TRANSFORMER_MODEL", "all-MiniLM-L6-v2"
+HF_MODEL = os.getenv(
+    "SENTENCE_TRANSFORMER_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
+HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+HF_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL}"
 
 # all-MiniLM-L6-v2 -> 384 dimensions
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
-
-
-@lru_cache(maxsize=1)
-def _get_embedder() -> SentenceTransformer:
-    return SentenceTransformer(SENTENCE_TRANSFORMER_MODEL)
 
 
 # ---------------------------------------------------
@@ -152,11 +147,23 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
-    model = _get_embedder()
-    vectors = model.encode(
-        texts,
-        normalize_embeddings=True,
-    )
+    if not HF_API_KEY:
+        raise ValueError("HUGGINGFACE_API_KEY is missing. Please set it in your .env or Render dashboard.")
 
-    # `encode` returns a numpy array (or list); ensure a JSON-serializable result.
-    return [v.tolist() for v in vectors]
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # We send the list of texts. 'wait_for_model': True ensures it doesn't fail if the model is loading
+    response = requests.post(
+        HF_URL, 
+        headers=headers, 
+        json={"inputs": texts, "options": {"wait_for_model": True}}
+    )
+    
+    if response.status_code != 200:
+        raise RuntimeError(f"Hugging Face API Error: {response.text}")
+
+    vectors = response.json()
+    return vectors
